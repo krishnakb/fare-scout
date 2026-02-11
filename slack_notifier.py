@@ -31,8 +31,10 @@ class SlackNotifier:
 
         lines.append("")
 
-        pe_best = results.get("PREMIUM_ECONOMY", [{}])[0].get("price")
-        eco_best = results.get("ECONOMY", [{}])[0].get("price")
+        pe_offers = results.get("PREMIUM_ECONOMY", [])
+        eco_offers = results.get("ECONOMY", [])
+        pe_best = pe_offers[0].get("price") if pe_offers else None
+        eco_best = eco_offers[0].get("price") if eco_offers else None
 
         for cabin, offers in results.items():
             if not offers:
@@ -41,43 +43,46 @@ class SlackNotifier:
             cabin_label = "Premium Economy" if cabin == "PREMIUM_ECONOMY" else "Economy"
             lines.append(f"*{cabin_label}*")
 
-            for i, offer in enumerate(offers[:3], 1):
+            for i, offer in enumerate(offers[:5], 1):
                 offer_currency = offer.get("currency", currency)
                 offer_symbol = self.CURRENCY_SYMBOLS.get(offer_currency, offer_currency + " ")
                 price_str = f"{offer_symbol}{offer['price']:,.0f}"
                 drop = offer.get("drop_pct")
                 drop_str = f" ⬇️{drop}%" if drop else ""
 
-                # Route with layovers
-                route = self._format_route(origin, destination, offer.get("layover_cities", []))
-
-                # Duration
-                duration = self._format_duration(offer.get("duration_minutes", 0))
-
-                # Times (compact)
-                times = self._format_times_compact(offer.get("departure_time"), offer.get("arrival_time"))
-
-                # Airlines (show all carriers)
+                # Airlines
                 carriers = offer.get("airlines", [offer.get("airline", "")])
                 if isinstance(carriers, str):
                     carriers = [carriers]
                 airline_str = "/".join(carriers) if carriers else ""
 
-                # Line 1: price, fare, [airlines], drop
-                lines.append(f"`{i}` *{price_str}* {offer['fare_family']} `{airline_str}`{drop_str}")
+                # Seats remaining
+                seats = offer.get("seats_remaining")
+                seats_str = f"  [{seats} seats]" if seats else ""
 
-                # Line 2: route • duration • times
-                details = [route]
-                if duration:
-                    details.append(duration)
-                if times:
-                    details.append(times)
-                lines.append(f"    {' • '.join(details)}")
+                # Line 1: rank, price, fare, airlines, drop, seats
+                lines.append(
+                    f"`{i}` *{price_str}* {offer['fare_family']} "
+                    f"`{airline_str}`{drop_str}{seats_str}"
+                )
+
+                # Line 2: outbound leg
+                lines.append(self._format_outbound_leg(origin, destination, offer))
+
+                # Line 3: return leg (if present)
+                ret_line = self._format_return_leg(destination, origin, offer)
+                if ret_line:
+                    lines.append(ret_line)
+
+                # Line 4: fare details (if present)
+                fare_line = self._format_fare_details(offer)
+                if fare_line:
+                    lines.append(fare_line)
 
             lines.append("")
 
         if pe_best and eco_best:
-            eco_currency = results.get("ECONOMY", [{}])[0].get("currency", currency)
+            eco_currency = eco_offers[0].get("currency", currency) if eco_offers else currency
             eco_symbol = self.CURRENCY_SYMBOLS.get(eco_currency, eco_currency + " ")
             premium = pe_best - eco_best
             pct = (premium / eco_best) * 100
@@ -87,8 +92,57 @@ class SlackNotifier:
 
         return "\n".join(lines)
 
+    def _format_outbound_leg(self, origin: str, dest: str, offer: dict) -> str:
+        """Format outbound itinerary line with ✈ prefix."""
+        route = self._format_route(origin, dest, offer.get("layover_cities", []))
+        duration = self._format_duration(offer.get("duration_minutes", 0))
+        flights = "/".join(offer.get("flight_numbers", []))
+        times = self._format_times_compact(
+            offer.get("departure_time"), offer.get("arrival_time")
+        )
+        parts = [route]
+        if duration:
+            parts.append(duration)
+        if flights:
+            parts.append(flights)
+        if times:
+            parts.append(times)
+        return f"    ✈ {' • '.join(parts)}"
+
+    def _format_return_leg(self, origin: str, dest: str, offer: dict) -> str:
+        """Format return itinerary line with ↩ prefix. Empty if no return data."""
+        if not offer.get("return_departure_time"):
+            return ""
+        route = self._format_route(origin, dest, offer.get("return_layover_cities", []))
+        duration = self._format_duration(offer.get("return_duration_minutes", 0))
+        flights = "/".join(offer.get("return_flight_numbers", []))
+        times = self._format_times_compact(
+            offer.get("return_departure_time"), offer.get("return_arrival_time")
+        )
+        parts = [route]
+        if duration:
+            parts.append(duration)
+        if flights:
+            parts.append(flights)
+        if times:
+            parts.append(times)
+        return f"    ↩ {' • '.join(parts)}"
+
+    def _format_fare_details(self, offer: dict) -> str:
+        """Format baggage + booking class line."""
+        parts = []
+        baggage = offer.get("baggage")
+        if baggage:
+            parts.append(f"🧳 {baggage}")
+        booking_class = offer.get("booking_class")
+        if booking_class:
+            parts.append(f"Class: {booking_class}")
+        if not parts:
+            return ""
+        return f"    {' • '.join(parts)}"
+
     def _format_route(self, origin: str, dest: str, layovers: list[str]) -> str:
-        """Format route with layover cities: JFK → LHR → CDG"""
+        """Format route with layover cities: JFK→LHR→CDG"""
         parts = [origin] + layovers + [dest]
         return "→".join(parts)
 
